@@ -1,0 +1,20 @@
+.env
+.env.*
+!.env.example
+
+*.md
+
+.git
+.gitignore
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Nothing here is needed to compile the Go binary
+*.exe
+*.test
+*.out
+bin/

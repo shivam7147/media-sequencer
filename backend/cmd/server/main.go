@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
 
 	"github.com/shivam7147/media-sequencer/backend/internal/config"
 	"github.com/shivam7147/media-sequencer/backend/internal/database"
 	"github.com/shivam7147/media-sequencer/backend/internal/handlers"
+	"github.com/shivam7147/media-sequencer/backend/internal/middleware"
+	"github.com/shivam7147/media-sequencer/backend/internal/sse"
 	"github.com/shivam7147/media-sequencer/backend/internal/store"
 )
 
@@ -48,15 +50,23 @@ func main() {
 		log.Println("database: tables ready, seed data already present")
 	}
 
-	h := handlers.New(store.New(pool))
+	broker := sse.NewBroker()
+	h := handlers.New(store.New(pool), broker)
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(chimiddleware.Logger)
+	r.Use(chimiddleware.Recoverer)
+	r.Use(middleware.CORS(cfg.AllowedOrigins))
 
 	r.Get("/health", handleHealth)
 	r.Get("/api/time", h.Time)
 	r.Get("/api/state", h.State)
+	r.Post("/api/windows/{id}/items", h.AddWindowItem)
+	r.Delete("/api/windows/{id}/items/{itemId}", h.DeleteWindowItem)
+	r.Post("/api/media", h.CreateMedia)
+	r.Post("/api/sync", h.CreateSync)
+	r.Put("/api/settings/cycle", h.SetCycleSeconds)
+	r.Get("/api/events", h.Events)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

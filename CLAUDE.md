@@ -89,8 +89,9 @@ gets a different subset/order so they're visibly out of phase until sync is trig
 | `PUT` | `/api/settings/cycle` | `{cycle_seconds}` → demo control |
 | `GET` | `/api/events` | SSE stream: `state_changed`, `sync` |
 
-Errors: `{"error":"message"}`. CORS restricted to `ALLOWED_ORIGIN` (not `*`) once the frontend
-is deployed; SSE responses need the CORS header too.
+Errors: `{"error":"message"}`. CORS allows only origins listed in `ALLOWED_ORIGIN` (never `*`,
+never an origin that isn't an exact match); SSE responses go through the same CORS middleware
+as everything else.
 
 ## Environment variables (backend)
 
@@ -98,7 +99,7 @@ is deployed; SSE responses need the CORS header too.
 |---|---|---|
 | `PORT` | HTTP listen port | `8080` |
 | `DATABASE_URL` | Render Postgres external connection string | (none — set in `backend/.env`) |
-| `ALLOWED_ORIGIN` | CORS origin allowed to call the API | `*` |
+| `ALLOWED_ORIGIN` | Comma-separated list of exact origins allowed to call the API (CORS) | `http://localhost:5173` |
 
 `backend/.env` (gitignored) is loaded via `godotenv` if present; `backend/.env.example`
 documents the shape. Production (Render) sets real env vars — no `.env` file there.
@@ -111,7 +112,9 @@ documents the shape. Production (Render) sets real env vars — no `.env` file t
 3. Video needs `muted`, `playsInline`, `autoplay` or autoplay silently fails.
 4. SSE needs a heartbeat comment every ~20s or Render's proxy closes the idle stream; client
    must reconnect on drop.
-5. `ALLOWED_ORIGIN` must be explicit, not `*`, once two origins exist — including for SSE.
+5. `ALLOWED_ORIGIN` must be explicit, not `*` — it's now a comma-separated list matched exactly
+   per-request and echoed back only on a match, so both the deployed frontend and
+   `http://localhost:5173` can be listed at once; this applies to SSE too.
 6. Static host needs a `/*` → `/index.html` rewrite or `/window/:id` 404s on refresh.
 7. Seed must be idempotent (`CREATE TABLE IF NOT EXISTS` + guarded inserts) or every restart
    duplicates rows.
@@ -127,9 +130,9 @@ Update the checkbox here immediately after a step is verified, before starting t
 - [x] **Step 2** — Postgres: provision, connect, migrate, seed
 - [x] **Step 3** — Schedule engine + exhaustive tests (`internal/schedule`)
 - [x] **Step 4** — Store + read API (`GET /api/state`, `GET /api/time`)
-- [ ] **Step 5** — Write API (add/delete item, add media, sync, cycle length)
-- [ ] **Step 6** — SSE (`GET /api/events`, broadcast on writes)
-- [ ] **Step 7** — Dockerfile + deploy backend to Render
+- [x] **Step 5** — Write API (add/delete item, add media, sync, cycle length)
+- [x] **Step 6** — SSE (`GET /api/events`, broadcast on writes) + CORS
+- [x] **Step 7** — Dockerfile (backend not yet deployed to Render — that's the user's next action)
 - [ ] **Step 8** — React shell + clock offset + Wall rendering
 - [ ] **Step 9** — Playback (`MediaFrame`), single-window route, refresh-proof timers
 - [ ] **Step 10** — SSE wiring + controls panel (media, sync, cycle length)
@@ -284,3 +287,141 @@ Update the checkbox here immediately after a step is verified, before starting t
   `is_sync:true` with the same `media_id` and matching countdown — confirmed the SQL interval
   query and the overlay both work end-to-end, then deleted the test rows to leave the database
   clean. `go build`, `go vet`, `gofmt -l .` all clean.
+
+### Step 5 — done
+
+- `internal/store/writes.go`: `ErrNotFound` sentinel; handlers turn it into 404, anything else
+  into 500 with the detail logged server-side only.
+  - `AppendWindowItem(ctx, windowID, mediaID, durationSeconds *int)` — one transaction: check
+    window exists, fetch media's `default_duration_seconds` (also doubles as the media-exists
+    check), compute `position = MAX(position)+1` for that window, insert. `durationSeconds` nil
+    means "use the media's default"; the transaction is what stops two concurrent appends to the
+    same window from racing on position.
+  - `DeleteWindowItem(ctx, windowID, itemID)` — single `DELETE ... WHERE id = $1 AND window_id =
+    $2`; zero rows affected means not-found (covers both "doesn't exist" and "belongs to a
+    different window" in one check). Comment explains the deliberate choice not to renumber
+    remaining positions — ordering only depends on relative order, not contiguity, so gaps are
+    harmless and renumbering would just be extra writes for no behavioural benefit.
+  - `CreateMedia`, `CreateSync`, `SetCycleSeconds` — straightforward inserts/upserts.
+    `SetCycleSeconds` upserts via `ON CONFLICT (key) DO UPDATE`, never touches `anchor`.
+  - `CreateSync` comment: a newer sync always outranks whatever was active, because `ActiveSync`
+    (Step 4) already orders by `start_at DESC` — no locking, no "already syncing" error, this is
+    the deliberate answer to two people triggering sync at nearly the same time.
+- `internal/handlers`: added `items.go` (`AddWindowItem`, `DeleteWindowItem`), `media.go`
+  (`CreateMedia`), `sync.go` (`CreateSync`), `settings.go` (`SetCycleSeconds`). Each does
+  request-shape validation (required fields, `kind` enum, `duration_seconds`/
+  `default_duration_seconds` > 0, `url` empty only for `kind: "blank"`) before calling the store;
+  existence checks (window/media/item) live in the store since they need the database.
+  `POST /api/sync` always uses `time.Now().UTC()` server-side for `start_at`, never a
+  client-supplied value — commented why (clock skew makes a client-chosen "now" meaningless for
+  something every window must agree on).
+  - `PUT /api/settings/cycle` clamps to `[10, 86400]` seconds — commented that the shipped
+    default is 18000 (5h) and this endpoint exists purely so a reviewer can drop it to ~60s and
+    watch the cycle restart in under a minute.
+  - `Handlers.broadcast(event string)` in `handlers.go` — the single marked no-op every write
+    handler already calls (`"state_changed"` for item/media/settings writes, `"sync"` for
+    `POST /api/sync`). Step 6 only has to give this one function a body.
+- `cmd/server/main.go`: registered all five write routes alongside the existing read/health
+  routes.
+- Verified against the **live** Render Postgres with real `curl` calls for every case in the
+  brief: add item (fallback duration and explicit duration), 404 on unknown window/media, 400 on
+  non-positive duration; delete item (204), 404 on unknown item and on an item requested through
+  the wrong window, confirmed the deleted items are actually gone and the remaining ones kept
+  their original positions (gap not renumbered); create media (201), 400 on bad `kind`, 400 on
+  empty `url` with a non-blank kind, 201 for blank+empty-url, 400 on missing `label` and on
+  non-positive `default_duration_seconds`; create sync (201), confirmed `active_sync` populates
+  and all 4 windows flip `is_sync:true` together, 404 on unknown media, 400 on non-positive
+  duration, and confirmed a second sync supersedes the first (`active_sync` moved to the new
+  `media_id`); set cycle (200) confirmed reflected in `/api/state`, 400 below 10 and above
+  86400. Cleaned up every row the tests created (test media, test sync events) and restored
+  `cycle_seconds` to 18000 afterward — live DB verified back to exactly the Step 2 seed state.
+  `go build`, `go vet`, `gofmt -l .`, `go test ./...` all clean.
+
+### Step 6 — done
+
+- `internal/sse/broker.go`: `Broker{subscribers map[chan string]struct{}}`, mutex-guarded.
+  `Subscribe()` returns a receive-only channel (buffered, size 4) plus an `unsubscribe` closure
+  that deletes-and-closes exactly once. `Broadcast(event)` sends to every subscriber with
+  `select { case ch <- event: default: }` — comment explains why non-blocking is load-bearing,
+  not just a nicety: every write handler calls `Broadcast` synchronously after committing, so a
+  blocking send to one slow/dead subscriber would stall every future write for every client, not
+  just that one connection. Dropping an event is safe because an event carries no data — it's
+  purely "go refetch /api/state" — so a client that misses one is still correct the moment it
+  refetches.
+- `internal/handlers/events.go`: `Events` requires `http.Flusher` (500 if the response writer
+  doesn't support it), sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+  `Connection: keep-alive`, `X-Accel-Buffering: no` (stops Render's proxy from buffering the
+  stream instead of forwarding it live). Sends `event: connected` immediately post-headers so
+  the client can tell "live, waiting" apart from "still connecting". A 20s `time.Ticker` sends
+  `: ping\n\n` (an SSE comment line, invisible to `EventSource` listeners) — commented why:
+  without it Render's proxy would close the connection as idle and the page would silently stop
+  updating with no error. Returns (and the deferred `unsubscribe` runs) when
+  `r.Context().Done()` fires. Event payloads are always `data: {}` — comment explains clients
+  refetch `/api/state` rather than trust a pushed value, so there's no ordering or staleness to
+  reason about on this stream at all.
+- `Handlers` gained a `Broker *sse.Broker` field (`New(store, broker)`); `broadcast()` from
+  Step 5 now calls `h.Broker.Broadcast(event)` instead of being a no-op — the one-function change
+  that step's comment promised.
+- `internal/middleware/cors.go`: `CORS(allowedOrigin)` sets `Access-Control-Allow-Origin` to
+  exactly the configured origin (never reflects the request's own `Origin`, never `*`),
+  `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`,
+  `Access-Control-Allow-Headers: Content-Type`, and short-circuits `OPTIONS` with a 204. Applied
+  via `r.Use(...)` ahead of every route in `main.go`, so it covers `/api/events` the same as
+  every other endpoint.
+- `cmd/server/main.go`: chi's own middleware package is now aliased `chimiddleware` to make room
+  for this project's `internal/middleware`; registered `sse.NewBroker()`, passed into
+  `handlers.New`, and added `GET /api/events`.
+- Verified against the **live** Render Postgres + a real running server: CORS headers correct on
+  both a plain `GET /api/state` and an `OPTIONS` preflight for `POST /api/media`; confirmed the
+  allowed origin is the fixed configured value even when the request sends a different `Origin`
+  (not reflected). Opened `GET /api/events` with `curl -N` and confirmed, on the same live
+  connection: the exact SSE headers, an immediate `event: connected`, then triggered
+  `PUT /api/settings/cycle` and `POST /api/sync` from a second terminal and watched
+  `event: state_changed` and `event: sync` arrive on the open stream in real time; waited past
+  20s and confirmed two `: ping` heartbeat lines; killed the curl client and confirmed the server
+  logged a clean disconnect (`GET /api/events ... 200 ... 1m4s`, no error) rather than hanging or
+  erroring. Cleaned up the test sync event afterward — live DB back to the seed state.
+  `go build`, `go vet`, `gofmt -l .`, `go test ./...` all clean.
+
+### Step 7 — done
+
+- **CORS change (requested alongside this step):** `ALLOWED_ORIGIN` is now a comma-separated
+  list. `internal/middleware/cors.go` splits it into a set, matches the request's `Origin`
+  header exactly, and echoes back only that exact value — never `*`, never an unmatched origin
+  (no `Access-Control-Allow-Origin` header at all in that case, which is what makes the browser
+  block it). Added `Vary: Origin` since the response now depends on the request's `Origin`.
+  `config.Config.AllowedOrigins` (renamed from `AllowedOrigin`) defaults to
+  `http://localhost:5173` instead of the old `*` fallback — under the new match-and-echo design
+  a literal `"*"` default would never match a real browser `Origin` header anyway, so it's
+  changed to a concrete origin that actually works for local dev out of the box (fail-closed if
+  truly unconfigured, not silently-permissive). `backend/.env.example` updated to show a
+  two-origin example (localhost + the eventual deployed frontend URL).
+  - Verified live: two-origin `ALLOWED_ORIGIN`, confirmed both listed origins get echoed back
+    correctly (with `Vary: Origin`), an unmatched origin gets no `Access-Control-Allow-Origin`
+    header, and a request with no `Origin` header also gets none — then restored the real
+    `.env` to its original single-origin value.
+- `backend/Dockerfile`: multi-stage, assumes the build context is `backend/` (not the repo
+  root) — every `COPY` path is relative to that.
+  - Stage 1 `golang:1.25-alpine`: `go.mod`/`go.sum` copied and `go mod download` run as their
+    own layer before the rest of the source, so dependency downloads are cached across builds
+    that only touch source. `CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w"` — comment notes
+    pgx is pure Go (speaks the Postgres wire protocol itself, no libpq/C dependency), so no C
+    toolchain is needed and the binary is fully static.
+  - Stage 2 `alpine:3.20`: `ca-certificates` installed (commented why: the DB connection uses
+    `sslmode=require`, so TLS verification needs root certs or every connection fails), a
+    non-root `app` user, binary copied in, `EXPOSE 8080`, `HEALTHCHECK` via `wget` against
+    `/health`, `CMD ["/app/server"]`. No data directory — all state is in Postgres, the
+    container itself is disposable. Final image: **29.1MB**.
+- `backend/.dockerignore`: excludes `.env`/`.env.*` (keeping `.env.example`), `*.md`, `.git`,
+  editor/OS cruft, and Go build artifacts that aren't needed to compile.
+- Verified with a real local Docker build (Docker Desktop wasn't running — started it and
+  waited for the daemon before proceeding): `docker build` succeeds cleanly in two stages; ran
+  the built image against the **live** Render Postgres via `DATABASE_URL` and confirmed in the
+  container logs `database: tables ready, seed data already present` and `listening on :8080`;
+  `curl /health` through the container returns `{"status":"ok"}` with the CORS headers already
+  applied; confirmed the process runs as `uid=100(app)`, not root; confirmed Docker's own
+  `HEALTHCHECK` reports `"Status":"healthy"` after its first successful probe. Cleaned up the
+  test container and image afterward.
+- **Not done as part of this step** (explicitly deferred to the user, per the brief): actually
+  provisioning the Render Web Service, setting `DATABASE_URL`/`ALLOWED_ORIGIN` there, and
+  deploying. The Dockerfile is ready for that; nothing here has touched Render.
