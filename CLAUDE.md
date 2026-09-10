@@ -1,0 +1,286 @@
+# CLAUDE.md — Multi-Window Media Sequencer
+
+Read this and [PLAN.md](PLAN.md) before starting any prompt in this project. PLAN.md has the
+full reasoning; this file is the fast-reference summary plus current status.
+
+Deadline: **12 AM Saturday 13 September 2026**.
+
+## The one idea
+
+What a window shows is a pure function of the current time — `currentItem(window, now)`.
+Nothing stores "where we are." A reload, a sync, a second browser window: all just re-evaluate
+the same function against the same clock. Never move off this model.
+
+## Locked decisions
+
+| Area | Choice |
+|---|---|
+| Backend | Go 1.25 + `chi` (module `github.com/shivam7147/media-sequencer/backend`) |
+| Storage | Postgres (Render free instance), `jackc/pgx/v5` stdlib adapter |
+| Live updates | SSE (`text/event-stream`), not WebSockets |
+| Frontend | React via Vite, plain JavaScript (no TypeScript) |
+| Deployment | Render Static Site (frontend) + Render Web Service/Docker (backend) + Render Postgres |
+| Media | Bundled assets in `frontend/public/media`, seeded as M1–M6 |
+| Repo | Single repo, `backend/` + `frontend/` |
+| Local dev DB | Render Postgres external connection string via `backend/.env` — no local Postgres install |
+
+## Schedule maths
+
+Per window: `anchor` (global epoch timestamp), `items` = ordered `[(media, duration)]`,
+`P = Σ durations`, `C` = cycle length in seconds (default **18000** = 5h, runtime-configurable).
+
+```
+elapsed = (t − anchor) mod C        // position within the cycle
+offset  = elapsed mod P             // position within the looping playlist
+walk items accumulating durations until offset falls inside item k
+→ item k, with (start_of_k + d_k − offset) seconds remaining
+```
+
+Clamp: if an item would run past the cycle boundary, cut it there so every window restarts
+together.
+
+**Edge cases (must hold in both Go and JS implementations):**
+
+| Case | Behaviour |
+|---|---|
+| Empty playlist | Show blank, never crash |
+| `P > C` | Playlist truncated at the cycle boundary; the tail never plays |
+| `P` doesn't divide `C` | Final repetition is cut short at the boundary — intended, keeps cycles aligned |
+| Blank in playlist | Ordinary item with its own duration; never appears unless configured |
+| Playlist changed mid-cycle | Recompute immediately from the same anchor; windows may jump — expected |
+| `now` before `anchor` | Must not crash or go negative — clamp/mod correctly |
+
+**Sync overlay** (applied after the schedule above):
+
+```
+if a sync event exists with start_at ≤ now < start_at + duration:
+    every window shows sync.media, with (start_at + duration − now) remaining
+else:
+    each window shows its own computed item
+```
+
+`internal/schedule` (Go) and `frontend/src/schedule.js` must implement identical logic —
+that agreement is what makes refresh-proofing and multi-window sync work at all.
+
+## Data model
+
+```sql
+media          (id, label, kind ['image'|'video'|'blank'], url, default_duration_seconds)
+windows        (id, name, position)
+window_items   (id, window_id, media_id, position, duration_seconds)
+sync_events    (id, media_id, start_at, duration_seconds, created_at)
+settings       (key, value)        -- 'cycle_seconds', 'anchor'
+```
+
+Seed: 4 windows, 6 media (M1–M6: four colour cards, one short video, one blank), each window
+gets a different subset/order so they're visibly out of phase until sync is triggered.
+
+## API contract
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | `{"status":"ok"}` |
+| `GET` | `/api/time` | `{"server_time":"…RFC3339Nano"}` — clock sync |
+| `GET` | `/api/state` | Server time, anchor, cycle seconds, all windows+items, media library, active sync |
+| `POST` | `/api/windows/{id}/items` | `{media_id, duration_seconds?}` → append to playlist |
+| `DELETE` | `/api/windows/{id}/items/{itemId}` | Remove an item |
+| `POST` | `/api/media` | `{label, kind, url, default_duration_seconds}` → add to library |
+| `POST` | `/api/sync` | `{media_id, duration_seconds}` → start a sync now |
+| `PUT` | `/api/settings/cycle` | `{cycle_seconds}` → demo control |
+| `GET` | `/api/events` | SSE stream: `state_changed`, `sync` |
+
+Errors: `{"error":"message"}`. CORS restricted to `ALLOWED_ORIGIN` (not `*`) once the frontend
+is deployed; SSE responses need the CORS header too.
+
+## Environment variables (backend)
+
+| Var | Purpose | Local dev default |
+|---|---|---|
+| `PORT` | HTTP listen port | `8080` |
+| `DATABASE_URL` | Render Postgres external connection string | (none — set in `backend/.env`) |
+| `ALLOWED_ORIGIN` | CORS origin allowed to call the API | `*` |
+
+`backend/.env` (gitignored) is loaded via `godotenv` if present; `backend/.env.example`
+documents the shape. Production (Render) sets real env vars — no `.env` file there.
+
+## Traps to not re-learn the hard way
+
+1. Never use raw `Date.now()` client-side — always go through the measured server-clock offset.
+2. Never use `setInterval` for playback — schedule one timer for exactly the remaining seconds
+   of the current item, then recompute.
+3. Video needs `muted`, `playsInline`, `autoplay` or autoplay silently fails.
+4. SSE needs a heartbeat comment every ~20s or Render's proxy closes the idle stream; client
+   must reconnect on drop.
+5. `ALLOWED_ORIGIN` must be explicit, not `*`, once two origins exist — including for SSE.
+6. Static host needs a `/*` → `/index.html` rewrite or `/window/:id` 404s on refresh.
+7. Seed must be idempotent (`CREATE TABLE IF NOT EXISTS` + guarded inserts) or every restart
+   duplicates rows.
+8. Ship the real default: `cycle_seconds = 18000`. The demo control changes it at runtime —
+   don't quietly ship 60s as the default.
+
+## Status checklist
+
+Work through these in order; each has its own verify step in PLAN.md § Execution pipeline.
+Update the checkbox here immediately after a step is verified, before starting the next.
+
+- [x] **Step 1** — Repo, backend skeleton, `/health`
+- [x] **Step 2** — Postgres: provision, connect, migrate, seed
+- [x] **Step 3** — Schedule engine + exhaustive tests (`internal/schedule`)
+- [x] **Step 4** — Store + read API (`GET /api/state`, `GET /api/time`)
+- [ ] **Step 5** — Write API (add/delete item, add media, sync, cycle length)
+- [ ] **Step 6** — SSE (`GET /api/events`, broadcast on writes)
+- [ ] **Step 7** — Dockerfile + deploy backend to Render
+- [ ] **Step 8** — React shell + clock offset + Wall rendering
+- [ ] **Step 9** — Playback (`MediaFrame`), single-window route, refresh-proof timers
+- [ ] **Step 10** — SSE wiring + controls panel (media, sync, cycle length)
+- [ ] **Step 11** — Deploy frontend + CORS wired to deployed backend
+- [ ] **Step 12** — README, `go test`/`go vet`/`gofmt` clean, repo public, submit
+
+### Step 1 — done
+
+- `git init` at repo root.
+- `backend/` scaffolded per PLAN.md layout: `cmd/server/`, `internal/{config,database,models,
+  schedule,store,sse,middleware,handlers}` (empty subpackages hold `.gitkeep` until their step).
+- `frontend/` directory skeleton only (`src/{components,pages}`, `public/media/`) — no app yet,
+  that's Step 8.
+- Go module: `github.com/shivam7147/media-sequencer/backend`, `go 1.25.0`, deps `go-chi/chi/v5`
+  and `joho/godotenv`.
+- `internal/config`: reads `PORT` / `DATABASE_URL` / `ALLOWED_ORIGIN` from env with defaults.
+- `cmd/server/main.go`: chi router with `middleware.Logger` + `middleware.Recoverer`,
+  `GET /health` → `{"status":"ok"}`, graceful shutdown via `signal.NotifyContext` +
+  `srv.Shutdown` with a 10s timeout.
+- `.gitignore` (root), `backend/.env.example`.
+- Verified: `go build ./...`, `go vet ./...`, `gofmt -l .` all clean; `go run ./cmd/server` then
+  `curl localhost:8080/health` → `{"status":"ok"}`; SIGTERM stops it and the port frees up.
+  (Note: SIGTERM delivery through Git Bash on native Windows doesn't reliably trigger Go's
+  signal handler the way it does on Linux — the code path is correct and will be exercised for
+  real under Docker/Render, which is Linux. Not a concern, just don't re-debug it here.)
+
+### Step 2 — done
+
+- Postgres already provisioned on Render (`backend/.env` has a live external `DATABASE_URL`,
+  gitignored) — provisioning happened before this step started.
+- `internal/database/database.go`: `NewPool` opens a `pgxpool.Pool` (MaxConns 10, MinConns 1,
+  30m max lifetime, 5m max idle, 1m health check), pings with a 10s timeout so a bad connection
+  string or unreachable host fails at boot with a clear error, not on the first request.
+  `Migrate` runs one `CREATE TABLE IF NOT EXISTS` block for `media`, `windows`, `window_items`,
+  `sync_events`, `settings`, plus `idx_window_items_window_position` — every column that holds a
+  time is `TIMESTAMPTZ`, `window_items` has FKs to both `windows` (`ON DELETE CASCADE`) and
+  `media` (`ON DELETE RESTRICT`).
+- `internal/database/seed.go`: `Seed` runs inside one transaction, checks `COUNT(*) FROM media`
+  first — if non-zero it commits a no-op and returns `seeded=false`; otherwise it inserts all 6
+  media, all 4 windows with their items, and the two `settings` rows (`cycle_seconds=18000`,
+  `anchor=2026-01-01T00:00:00Z` — a fixed constant, never `time.Now()`, and never overwritten on
+  later boots via `ON CONFLICT (key) DO NOTHING`). This makes restart-without-duplication
+  structural, not just convention.
+- `cmd/server/main.go`: boots the pool → migrate → seed → log one line
+  (`"database: tables ready, seed data inserted"` or `"...already present"`) before starting the
+  HTTP server; `pool.Close()` is deferred alongside the existing graceful shutdown.
+- Seed data actually inserted (see table below) — subset/order per window is deliberate so the
+  wall is visibly out of phase pre-sync:
+
+  | Window | Items (label, duration) |
+  |---|---|
+  | Window 1 | M1(8s), M2(10s), M3(7s) |
+  | Window 2 | M3(7s), M4(9s), M5(15s) |
+  | Window 3 | M5(15s), M1(8s), M6(5s), M2(10s) |
+  | Window 4 | M6(5s), M4(9s), M2(10s), M3(7s) |
+
+  Media: M1–M4 images (`/media/m1.svg`…`/media/m4.svg`, real 1280×720 SVG cards now in
+  `frontend/public/media/`, strong distinct colours + large centred label), M5 video
+  (`/media/m5.mp4` — URL seeded, file itself not created yet, out of scope for this step), M6
+  blank (empty `url`).
+- Verified against the **live** Render Postgres: first boot logged `seed data inserted` and
+  actually wrote 6 media / 4 windows / 14 window_items / 2 settings rows; a second boot logged
+  `seed data already present` with zero new rows (checked directly via a throwaway query
+  script — counts unchanged, no duplicates). `go build`, `go vet`, `gofmt -l .` all clean.
+
+### Step 3 — done
+
+- `internal/schedule/schedule.go`: pure functions, no database or HTTP imports — portable to
+  `frontend/src/schedule.js` near line-for-line when Step 8 needs it.
+  - `Item{MediaID, DurationSeconds}`, `SyncEvent{MediaID, StartAt, DurationSeconds}`,
+    `Resolved{MediaID, Remaining, IsSync}` as specified.
+  - `floorMod(a, n time.Duration) time.Duration` — always returns `[0, n)`, unlike Go's `%`
+    which goes negative for a negative dividend. Used for both the cycle wrap
+    (`now - anchor`) and the playlist wrap (`elapsed mod P`), so a `now` before `anchor` (clock
+    skew, wrong client clock, future anchor) still produces a valid non-negative position
+    instead of garbage.
+  - Non-positive-duration items are excluded from the playlist-duration sum and skipped in the
+    walk — necessary for negative durations specifically (they'd shrink the running total and
+    throw off every later comparison); zero-duration items are harmless either way but skipped
+    for clarity. The single linear pass over `items` is bounded by slice length regardless, so
+    there's no possible infinite loop here by construction.
+  - `minRemaining = time.Second` floors every `Remaining` — landing exactly on a boundary, or
+    the cycle-end clamp, can otherwise produce zero or a sub-second value that would make a
+    client schedule a zero-delay timer and spin.
+  - `CurrentItem` returns `(Resolved, bool)` — `ok=false` means "nothing valid to show" (empty
+    playlist or every item invalid); `Resolved.MediaID` is then the zero value and
+    `Resolved.Remaining` is clamped time-to-cycle-end, so the caller knows when it's worth
+    checking again.
+  - Playlist-longer-than-cycle truncation, and the final-repetition-cut-short-when-P-doesn't-
+    divide-C behaviour, both fall out of one shared computation
+    (`remaining = min(item's natural remaining, time to cycle end)`) — no special-casing needed
+    per scenario.
+  - `Resolve` layers the sync overlay on top of `CurrentItem` using plain `time.Time` comparison
+    (`start_at <= now < start_at+duration`, half-open) since a sync is a one-shot absolute
+    interval, not cyclic — the base schedule is never touched, so when the sync ends every
+    window is exactly where its own schedule would already have put it.
+- `schedule_test.go`: table-driven, all cases from the brief covered and asserting both
+  `MediaID` and `Remaining` (plus `ok`/`IsSync` where relevant): mid-item; exact start instant;
+  exact end instant; wrap at end of playlist; wrap at end of cycle (multiple cycles elapsed);
+  empty playlist; single item; one item longer than the whole cycle; playlist not dividing the
+  cycle (with a case where truncation actually bites, not just coincides with the item's own
+  end); now == anchor; now before anchor; a zero-duration item mixed in; the `minRemaining`
+  clamp on a genuine sub-second case; sync active; sync just expired (boundary instant); sync in
+  the future; sync with a non-positive duration (guard added alongside the item-duration guard).
+- Verified: `go test ./internal/schedule/... -v` — all 18 subtests pass. `go build ./...`,
+  `go vet ./...`, `gofmt -l .` all clean.
+
+### Step 4 — done
+
+- `internal/models`: `Media`, `WindowItem`, `Window` (with `Items []WindowItem`), `SyncEvent`,
+  `Settings` — plain structs mirroring the schema, no DB tags needed since `store` scans
+  positionally.
+- Extended `schedule.Resolved` with a `Blank bool` field (touches Step 3's code — noted here
+  since that step's CLAUDE.md entry described the struct without it). Set `true` at all three
+  "nothing valid to show" return points in `CurrentItem`, left `false` (zero value) everywhere
+  else, including when `Resolve` returns an active sync. This keeps "is there really nothing to
+  show" as a single source of truth inside the schedule package rather than handlers
+  re-deriving it from the `(Resolved, bool)` return or guessing from `MediaID == 0`. Existing
+  `schedule_test.go` cases don't assert on `Blank` and all still pass unchanged.
+- `internal/store/store.go`: `Store` wraps `*pgxpool.Pool`. One method per thing, all
+  `context.Context`-first, all returning `internal/models` types — no SQL leaks outside this
+  package.
+  - `ListMedia` — ordered by id.
+  - `ListWindows` — two queries total (windows, then all window_items ordered by
+    `window_id, position`), grouped in Go — not N+1.
+  - `GetSettings` — reads both `settings` rows in one query, parses `anchor` via
+    `time.RFC3339Nano` and `cycle_seconds` via `strconv.Atoi`, errors clearly if either key or
+    parse is missing/bad.
+  - `ActiveSync(ctx, now)` — `start_at <= now AND start_at + (duration_seconds * interval '1
+    second') > now`, ordered `start_at DESC LIMIT 1`; returns `(nil, nil)` on `pgx.ErrNoRows`
+    rather than an error, since "no active sync" is the normal case.
+- `internal/handlers`: `Handlers{Store}`, `New(*store.Store)`.
+  - `Time` — no DB call, just `time.Now().UTC().Format(RFC3339Nano)`; kept deliberately cheap
+    since the client samples it repeatedly for clock-offset estimation.
+  - `State` — calls all four store methods, converts to JSON types, and resolves every window
+    server-side via `schedule.Resolve` (same `activeSync` overlay object reused across all
+    windows, matching "every window shows sync.media"). `resolved.blank` is copied straight from
+    `schedule.Resolved.Blank` — never inferred from `media_id == 0` — and when blank, `media_id`
+    is omitted (zero value) and `kind` is reported as `"blank"`. A comment on the handler
+    explains why resolving server-side matters: `curl /api/state` alone shows exactly what every
+    window should be displaying at that instant, no browser or client maths required.
+  - Errors use round 1's `{"error":"message"}` shape via a small `writeJSON`/`writeError` helper
+    in `json.go`; store failures are logged server-side with detail and reported to the client
+    generically (500, no SQL leaked).
+- `cmd/server/main.go`: wires `store.New(pool)` into `handlers.New(...)`, registers
+  `GET /api/time` and `GET /api/state` alongside the existing `/health`.
+- Verified against the **live** Render Postgres: `curl /api/time` and `curl /api/state` both
+  return correct, well-formed JSON; the four seeded windows show different `resolved` items
+  (confirming they're genuinely out of phase pre-sync) with consistent fractional
+  `remaining_seconds`. Inserted a real `sync_events` row directly via a throwaway script and
+  re-curled `/api/state`: `active_sync` populated, all four windows flipped to
+  `is_sync:true` with the same `media_id` and matching countdown — confirmed the SQL interval
+  query and the overlay both work end-to-end, then deleted the test rows to leave the database
+  clean. `go build`, `go vet`, `gofmt -l .` all clean.
