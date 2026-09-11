@@ -3,7 +3,7 @@
 # of handing the URL to the React router.
 services:
   - type: web
-    name: media-sequencer-web
+    name: media-sequencer-xtb5
     runtime: static
     rootDir: frontend
     buildCommand: npm install && npm run build

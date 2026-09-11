@@ -4,7 +4,7 @@ Multiple display windows each play their own media playlist continuously on a
 5-hour cycle. A sync action shows one chosen media item across every window at
 the same instant, after which each window resumes its own sequence.
 
-**Live app:** https://media-sequencer-web.onrender.com
+**Live app:** https://media-sequencer-xtb5.onrender.com
 **API:** https://media-sequencer-api.onrender.com — health: `/health`, full state: `/api/state`
 
 Author: Shivam Rao — [GitHub](https://github.com/shivam7147) · [LinkedIn](https://www.linkedin.com/in/shivam-rao-940327290/)
