@@ -133,8 +133,9 @@ Update the checkbox here immediately after a step is verified, before starting t
 - [x] **Step 5** — Write API (add/delete item, add media, sync, cycle length)
 - [x] **Step 6** — SSE (`GET /api/events`, broadcast on writes) + CORS
 - [x] **Step 7** — Dockerfile (backend not yet deployed to Render — that's the user's next action)
-- [ ] **Step 8** — React shell + clock offset + Wall rendering
-- [ ] **Step 9** — Playback (`MediaFrame`), single-window route, refresh-proof timers
+- [x] **Step 8** — React shell + clock offset + Wall rendering
+- [x] **Step 9** — Playback (`MediaFrame`), single-window route, refresh-proof timers
+  (⚠ `frontend/public/media/m5.mp4` still doesn't exist — see note below, deferred by the user)
 - [ ] **Step 10** — SSE wiring + controls panel (media, sync, cycle length)
 - [ ] **Step 11** — Deploy frontend + CORS wired to deployed backend
 - [ ] **Step 12** — README, `go test`/`go vet`/`gofmt` clean, repo public, submit
@@ -425,3 +426,165 @@ Update the checkbox here immediately after a step is verified, before starting t
 - **Not done as part of this step** (explicitly deferred to the user, per the brief): actually
   provisioning the Render Web Service, setting `DATABASE_URL`/`ALLOWED_ORIGIN` there, and
   deploying. The Dockerfile is ready for that; nothing here has touched Render.
+
+### Step 8 — done
+
+- **Scaffolding:** `npm create vite@latest` refused a path with a colon/backslashes when passed
+  as an absolute Windows temp path (silently created a mis-named relative directory instead —
+  cleaned up and not left behind); worked once run from inside the temp directory with a plain
+  relative name. Scaffolded into `$env:TEMP\vite-scaffold-mediaseq` (React template, JS not TS),
+  then merged the generated `package.json`, `vite.config.js`, `index.html`, `.gitignore`,
+  `.oxlintrc.json`, `src/main.jsx` into `frontend/` — `public/media/m1.svg`…`m4.svg` were never
+  touched by the scaffold step and are still exactly the Step 2 seed files. Discarded the
+  scaffold's own `App.jsx`/`App.css`/`assets/` (React/Vite demo content) and its landing-page
+  `index.css` in favor of this project's own. Current toolchain from the scaffold: Vite 8,
+  React 19, `oxlint` (not eslint) for linting.
+- `src/api.js` — thin `fetch` wrapper (`request(path, options)`) reading `VITE_API_BASE` from
+  `import.meta.env`; throws an `Error` carrying the backend's own `{"error": "..."}` message on
+  a non-2xx response, falling back to the HTTP status line only if the body isn't JSON.
+  `getState()`/`getTime()` are used starting this step; `addWindowItem`, `deleteWindowItem`,
+  `createMedia`, `createSync`, `setCycleSeconds` are implemented as real (not placeholder) thin
+  wrappers matching the API contract exactly, but nothing calls them yet — Step 10 wires them
+  into the controls panel.
+- `src/clock.js` — `syncClock()` samples `GET /api/time` 5 times, computes
+  `offset = serverTime - (localBefore + rtt/2)` per sample, and keeps the **lowest-RTT** sample
+  rather than averaging — commented why: a slow round trip could have been slow outbound,
+  inbound, or queued in between, so the fastest sample is the one where "the response landed
+  halfway through the round trip" is closest to true. `serverNow()` returns
+  `Date.now() + offset`; `startClockSync()` runs an initial sync then re-samples every 5 minutes,
+  returning a cleanup function. Comment on the module explains why this exists at all: every
+  window derives what it shows from the clock, so a browser with a wrong clock would otherwise
+  confidently show the wrong media.
+- `src/schedule.js` — direct port of `internal/schedule/schedule.go`, explicitly commented as
+  such (Go is the reference; fix this file to match Go, never the reverse). Same `floorMod`
+  (JS `%` has the identical negative-operand bug as Go's), same non-positive-duration guard in
+  both the sum and the walk, same `MIN_REMAINING_MS = 1000` clamp, same
+  `min(item's natural remaining, time to cycle end)` line, same half-open sync-overlay interval
+  check. The one deliberate difference: Go's `time.Duration` (nanoseconds) becomes plain
+  milliseconds throughout, since that's the native unit of `Date.now()`/`serverNow()` — every
+  formula has the same shape, just in that unit. Exports `floorMod`, `currentItem` (returns
+  `{resolved, ok}`, mirroring Go's `(Resolved, bool)`), and `resolve`.
+  - **Verified independently of the UI**: wrote a throwaway Node script re-running the exact
+    same 17 cases from `schedule_test.go` (mid-item, exact start/end instants, wrap at end of
+    playlist, wrap at end of cycle across multiple cycles, empty playlist, single item, item
+    longer than the whole cycle, `P` not dividing `C`, now == anchor, now before anchor,
+    zero-duration item mixed in, the `MIN_REMAINING_MS` clamp on a genuine sub-second case, sync
+    active, sync just expired, sync in the future, `floorMod` on a negative operand) against
+    `schedule.js` directly — all 17 passed with identical expected values to the Go suite, then
+    deleted the script.
+- `src/components/WindowTile.jsx` — renders the window name, a `SYNC` badge when
+  `resolved.isSync`, remaining seconds, and the media itself: a real `<img>` for `kind: "image"`,
+  a labelled placeholder for `video` and for `blank`/`resolved.blank` (proper `<video>` and blank
+  handling is Step 9's `MediaFrame`). Comment distinguishes `resolved.blank` ("nothing valid to
+  show" from the schedule) from a configured blank media item (real id/label, just empty `url`).
+- `src/pages/Wall.jsx` — fetches `/api/state` once on mount; converts `active_sync` and each
+  window's `items` from the API's snake_case shape into `schedule.js`'s camelCase shape once,
+  memoized. **One shared `setInterval(..., 250)`** re-reads `serverNow()` and triggers a
+  recompute of every window on each tick, rather than a per-window timer — comment explains why
+  that's sufficient and simpler: because nothing about what a window shows is stored (it's
+  recomputed fresh from the anchor and the clock every tick), a coarse tick is self-correcting
+  and there is no accumulating drift to manage, so one timer driving every window is simpler to
+  reason about than N independent ones. Renders a responsive `auto-fit` CSS grid of
+  `WindowTile`s.
+- `frontend/.env` / `.env.example`: `VITE_API_BASE=http://localhost:8080`. Confirmed via
+  `git check-ignore -v frontend/.env` that the root `.gitignore`'s bare `.env` pattern already
+  covers it (matches at any depth), and `!*.env.example` correctly keeps the example file
+  tracked — no frontend-specific `.gitignore` entry was needed for this.
+- Verified against a **live** local backend (pointed at the real Render Postgres) and the Vite
+  dev server together: `npm run lint` (oxlint) and `npm run build` both clean (one React
+  Compiler memoization warning on first build, fixed by correcting a `useMemo` dependency array
+  to `[state]`, then clean). Started the Go backend and `vite dev` side by side; confirmed the
+  backend's CORS middleware correctly allows `Origin: http://localhost:5173`; confirmed all four
+  seeded SVGs (`/media/m1.svg`…`m4.svg`) are served by the Vite dev server itself (bundled
+  frontend assets, not backend-served); confirmed every new source module
+  (`main.jsx`/`App.jsx`/`Wall.jsx`/`WindowTile.jsx`/`api.js`/`clock.js`/`schedule.js`) transforms
+  through Vite's dev server with no error. **Not verified**: actual in-browser rendering — no
+  browser automation tool is available in this environment, so the grid's visual appearance and
+  live countdown/looping behavior (the brief's own verify step: "windows show different media
+  and change on their own; set cycle to 60s and watch them loop") still needs a real browser,
+  which is what the user will do next. Stopped both dev servers and freed their ports afterward.
+
+  Everything downstream of `/api/state` was checked as rigorously as possible without a browser:
+  the schedule maths (the part most likely to be silently wrong) is verified byte-for-byte
+  against the Go reference's own test cases; the network layer (CORS, static assets, API JSON)
+  is verified live; only the final "does React actually paint this correctly" step is left for
+  visual confirmation.
+
+### Step 9 — done, with one open item
+
+- **`frontend/public/media/m5.mp4` is still missing.** `ffmpeg` isn't installed (checked both
+  Git Bash's and native Windows' `PATH` — not found either way). Asked the user how to proceed;
+  they chose to skip video generation for now rather than install ffmpeg or supply a file. The
+  seed still points `M5` at `/media/m5.mp4` (Step 2), so until that file exists, `M5` will hit
+  `MediaFrame`'s video `onError` fallback and render as `"M5 (missing)"` instead of playing —
+  confirmed this actually happens (see verify notes below), so it fails visibly, not silently.
+  Revisit when ffmpeg is available or a clip is supplied — no code change needed either way, just
+  drop the file in place.
+- `src/schedule.js` gained one JS-only field beyond the Go port: `resolved.elapsedMs` — how far
+  into its current slot the resolved item already is. Computed as `offset - acc` at the point an
+  item matches in `currentItem`'s walk (always ≥ 0 by the loop's own invariant, and unaffected by
+  the cycle-boundary clamp, since that only shortens what's left, not what's already played), and
+  as `now - start` in `resolve`'s sync branch. Commented as a deliberate addition — Go's
+  `Resolved` doesn't need it since the backend never plays video — rather than silently
+  diverging from the "direct port" claim without explanation.
+  - Re-verified the full Node cross-check against `schedule_test.go`'s cases after this change
+    (mid-item, exact start, item-longer-than-cycle, `P` not dividing `C`, empty playlist, sync
+    active — now also asserting `elapsedMs` on each), plus `floorMod` — all passed, confirming
+    the addition didn't disturb the existing port. Deleted the script afterward.
+- `src/components/MediaFrame.jsx` — the one place that decides how each media kind renders,
+  used by both the Wall tiles and the single-window route:
+  - `image` → `<img>` keyed on `url` (so switching to a different image resets error state),
+    `object-fit: cover`; `onError` flips to a `"label (missing)"` placeholder instead of a
+    broken-image icon.
+  - `video` → `<video muted autoPlay playsInline loop>`, keyed on `url`. Comment explains all
+    three non-`loop` attributes are required together: browsers block autoplay unless muted,
+    and without `playsInline` iOS Safari forces fullscreen instead of playing inline — there's no
+    user interaction available on a wall display to hang a "click to play" prompt on, so neither
+    can be dropped. `onLoadedMetadata` seeks once (guarded by a ref so it only fires on the
+    initial mount for this item, not on every tick) to `elapsedMs / 1000`, modulo the video's own
+    `duration` in case the clip is shorter than its scheduled slot — so a reload landing 6s into
+    a 15s item resumes 6s in rather than restarting, the same clock-derived "nothing is stored"
+    rule as the rest of the schedule. `onError` falls back the same way as the image case.
+  - `blank` (`resolved.blank` **or** a configured `kind: "blank"` media item) → a plain dark
+    panel with a label — comment distinguishes the two cases (nothing-to-show vs. a deliberate
+    blank item) even though they render identically, since a future change might want to tell
+    them apart visually.
+- `src/windowSchedule.js` (new): adapter layer between `/api/state`'s snake_case JSON and
+  `schedule.js`'s plain camelCase shapes (`toScheduleItems`, `toScheduleSync`,
+  `resolveWindowMedia`) — kept out of `schedule.js` on purpose so that file stays API-shape-
+  agnostic. `resolveWindowMedia(state, window, now)` is the one function both pages call to
+  avoid re-deriving anchor/sync/media-lookup logic twice.
+- `src/useSequencerState.js` (new): the fetch-once + clock-sync + shared-250ms-ticker logic
+  pulled out of `Wall.jsx` into a hook so `SingleWindow.jsx` reuses the exact same one instead of
+  rolling a second ticker — this is what "both use the same shared ticker" means in practice:
+  one hook, so there's structurally no way for a second page to reintroduce per-window timers.
+- `src/pages/Wall.jsx`: now uses the hook + adapter above; each tile is wrapped in a
+  `react-router-dom` `<Link to={\`/window/${window.id}\`}>` so every tile is a discoverable link
+  to its own single-window view.
+- `src/pages/SingleWindow.jsx` (new): full-bleed `MediaFrame` for one window (`useParams()` for
+  `:id`, 404-style message if no window matches) plus a small caption bar with the window name,
+  a `SYNC` badge when active, and a back-link to `/` (not explicitly requested, but free to add
+  and avoids a dead-end full-bleed page with no way back other than the browser's own button).
+- `src/App.jsx`: added `react-router-dom` (`BrowserRouter`/`Routes`/`Route`), `/` → `Wall`,
+  `/window/:id` → `SingleWindow`.
+- `index.css`: `.window-tile-link` (block-level, no default link styling, a focus/hover outline
+  since tiles are now interactive), `.media-video` (same `object-fit: cover` treatment as
+  images), `.media-blank` (unified panel style, replacing the old two-class placeholder pattern
+  now that image/video/blank all funnel through `MediaFrame`), `.single-window` /
+  `.single-window-media` / `.single-window-caption` / `.single-window-back` for the full-bleed
+  route.
+- Verified against a **live** local backend + Vite dev server together: `npm run lint` and
+  `npm run build` both clean (33 modules, up from 21). Both `/` and `/window/1` return 200 from
+  the dev server; every new/changed module
+  (`App.jsx`/`Wall.jsx`/`SingleWindow.jsx`/`WindowTile.jsx`/`MediaFrame.jsx`/
+  `useSequencerState.js`/`windowSchedule.js`/`schedule.js`) transforms with no error; `/api/state`
+  still returns all four windows correctly through CORS. Deliberately checked what happens when
+  `<video src="/media/m5.mp4">` (the missing file) is requested through the dev server: it
+  returns **200 with `Content-Type: text/html`** (Vite's dev SPA fallback serves `index.html` for
+  any unmatched path, exactly like the production rewrite Step 11 will add) rather than a clean
+  404 — confirmed this is exactly the shape of failure `MediaFrame`'s `onError` is built to
+  catch, since a browser fed HTML as video data fires a decode `error` event, not a silent hang.
+  Stopped both dev servers and freed their ports afterward. **Not verified** (same limitation as
+  Step 8): actual in-browser rendering, the visual seek-on-reload behavior, and click-through
+  navigation from a Wall tile to its `/window/:id` — no browser automation tool is available
+  here, so that's left for the user's own browser testing, which is what they asked for.
