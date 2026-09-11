@@ -1,0 +1,17 @@
+# Render Blueprint. The rewrite is load-bearing: without it, refreshing
+# /window/:id 404s because the CDN looks for a file at that path instead
+# of handing the URL to the React router.
+services:
+  - type: web
+    name: media-sequencer-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE
+        value: https://media-sequencer-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

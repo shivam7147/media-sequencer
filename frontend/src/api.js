@@ -39,8 +39,7 @@ export function getTime() {
   return request('/api/time')
 }
 
-// -- Writes: thin wrappers, not yet called from any UI (Step 10 wires
-// these into the controls panel) -----------------------------------------
+// -- Writes, used by the Wall controls panel -----------------------------
 
 export function addWindowItem(windowId, { mediaId, durationSeconds } = {}) {
   return request(`/api/windows/${windowId}/items`, {
@@ -82,4 +81,38 @@ export function setCycleSeconds(cycleSeconds) {
     method: 'PUT',
     body: JSON.stringify({ cycle_seconds: cycleSeconds }),
   })
+}
+
+// Subscribe to GET /api/events. Named SSE events never fire `onmessage`
+// (that's only the default unnamed type), so we listen for the names the
+// backend actually sends. EventSource reconnects on its own, but a closed
+// stream behind a proxy can sit in CLOSED without recovering — we close
+// and reopen on error so a drop always becomes a new connection.
+export function subscribeEvents(onEvent) {
+  let source = null
+  let retryTimer = null
+  let stopped = false
+
+  const open = () => {
+    if (stopped) return
+    source = new EventSource(`${BASE_URL}/api/events`)
+    const handle = () => onEvent()
+    source.addEventListener('connected', handle)
+    source.addEventListener('state_changed', handle)
+    source.addEventListener('sync', handle)
+    source.onerror = () => {
+      source.close()
+      source = null
+      if (stopped) return
+      retryTimer = setTimeout(open, 2000)
+    }
+  }
+
+  open()
+
+  return () => {
+    stopped = true
+    if (retryTimer) clearTimeout(retryTimer)
+    if (source) source.close()
+  }
 }

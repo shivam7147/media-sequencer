@@ -101,12 +101,12 @@ minute. Remember to set it back to 18000.
   is a query ordered by `start_at`, not a state machine.
 - Video autoplay requires `muted` + `playsInline`; a reload mid-clip seeks to
   the correct offset rather than restarting.
-- **Not yet wired in the UI:** the SSE stream and the add-media / trigger-sync
-  controls exist and are tested on the backend (`/api/events`, `/api/sync`,
-  `POST /api/windows/{id}/items`), but the React controls panel was not
-  finished before the deadline. Sync and playlist changes can be exercised
-  directly against the API with the calls above, and every open window reflects
-  them on its next state fetch.
+- The wall page has a controls panel (add an item to a window, trigger a
+  sync overlay, change cycle length) and subscribes to `/api/events` so
+  every open browser refetches `/api/state` when something changes. The
+  same curl calls still work if you want to drive it from the API.
 - Hosting is Render's free tier: the API sleeps after ~15 minutes idle, so the
   first request may take ~50 seconds, and the free Postgres instance expires
   after 30 days.
+- The static site rewrites `/*` to `/index.html` (see `render.yaml`) so a
+  refresh of `/window/:id` does not 404.

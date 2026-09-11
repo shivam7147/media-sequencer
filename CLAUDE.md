@@ -136,7 +136,7 @@ Update the checkbox here immediately after a step is verified, before starting t
 - [x] **Step 8** — React shell + clock offset + Wall rendering
 - [x] **Step 9** — Playback (`MediaFrame`), single-window route, refresh-proof timers
   (⚠ `frontend/public/media/m5.mp4` still doesn't exist — see note below, deferred by the user)
-- [ ] **Step 10** — SSE wiring + controls panel (media, sync, cycle length)
+- [x] **Step 10** — SSE wiring + controls panel (media, sync, cycle length)
 - [ ] **Step 11** — Deploy frontend + CORS wired to deployed backend
 - [ ] **Step 12** — README, `go test`/`go vet`/`gofmt` clean, repo public, submit
 

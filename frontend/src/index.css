@@ -21,11 +21,144 @@ body {
   color: #888;
 }
 
+.wall-header {
+  padding: 1rem 1.25rem 0;
+}
+
+.wall-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.wall-header p {
+  margin: 0.25rem 0 0;
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.wall-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  gap: 1rem;
+  align-items: start;
+}
+
 .wall-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 1rem;
   padding: 1rem;
+}
+
+.controls {
+  margin: 1rem 1rem 1rem 0;
+  padding: 1rem;
+  background: #181a20;
+  border: 1px solid #2a2d36;
+  border-radius: 8px;
+}
+
+.controls h2,
+.controls h3 {
+  margin: 0 0 0.5rem;
+}
+
+.controls h2 {
+  font-size: 1.05rem;
+}
+
+.controls h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9aa;
+}
+
+.controls form,
+.controls section {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: #bbb;
+}
+
+.controls input,
+.controls select {
+  background: #111318;
+  color: #eee;
+  border: 1px solid #2a2d36;
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+
+.controls button {
+  background: #2e5f99;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.controls-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #888;
+  line-height: 1.4;
+}
+
+.controls-library {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+.controls-library li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid #2a2d36;
+}
+
+.controls-library span {
+  color: #888;
+}
+
+.controls-error {
+  color: #e57373;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 800px) {
+  .wall-body {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    margin: 0 1rem 1rem;
+  }
 }
 
 .window-tile-link {
