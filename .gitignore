@@ -20,6 +20,10 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 
+# Internal dev docs
+CLAUDE.md
+PLAN.md
+
 # IDE
 .vscode/
 .idea/
